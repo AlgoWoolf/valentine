@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Valentine</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#111; display:grid; place-items:center; }
+    canvas { image-rendering: pixelated; border: 4px solid #2a2a2a; border-radius: 12px; background:#0b0f12; }
+    .hint { color:#cfcfcf; font-family: system-ui, Arial; font-size: 12px; margin-top: 10px; opacity: .85; text-align:center; }
+    .hint kbd{ background:#222; border:1px solid #444; padding:2px 6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <div>
+    <canvas id="game" width="768" height="448"></canvas>
+    <div class="hint">
+      Move: <kbd>WASD</kbd>/<kbd>Arrows</kbd> · Interact: <kbd>E</kbd> · Next: <kbd>Space</kbd>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ====== Config ======
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  // Pixel scaling vibe
+  const TILE = 32;
+  const W = canvas.width;
+  const H = canvas.height;
+
+  // ====== Utility ======
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const rectsOverlap = (a, b) =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+  // ====== Input ======
+  const keys = new Set();
+  window.addEventListener("keydown", (e) => {
+    // Prevent scroll with arrows/space
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+    keys.add(e.key.toLowerCase());
+  });
+  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+
+  const pressed = (k) => keys.has(k);
+
+  // ====== Game state ======
+  const state = {
+    time: 0,
+    dayPhase: 0, // 0..1
+    dialogueOpen: true,
+    dialogueLines: [
+      "Hi my love :)",
+      "Today’s quest: collect 3 gifts around the farm.",
+      "Bring them back to the porch and press E.",
+    ],
+    dialogueIndex: 0,
+    inventory: new Set(),
+    questComplete: false,
+    endingShown: false,
+  };
+
+  // ====== World ======
+  // Simple collision boxes (trees, pond, fences, house)
+  const obstacles = [
+    // House
+    { x: 10*TILE, y: 2*TILE, w: 6*TILE, h: 4*TILE },
+    // Pond
+    { x: 2*TILE, y: 9*TILE, w: 7*TILE, h: 3*TILE },
+    // Trees (top row)
+    { x: 0*TILE, y: 0*TILE, w: 24*TILE, h: 1*TILE },
+    // Left/right borders (invisible wall edges)
+    { x: -TILE, y: 0, w: TILE, h: H },
+    { x: W, y: 0, w: TILE, h: H },
+    { x: 0, y: -TILE, w: W, h: TILE },
+    { x: 0, y: H, w: W, h: TILE },
+    // Fence strip bottom
+    { x: 0, y: 13*TILE, w: 24*TILE, h: TILE },
+  ];
+
+  const porch = { x: 12*TILE, y: 6*TILE, w: 2*TILE, h: 1*TILE };
+
+  const items = [
+    {
+      id: "honeypot",
+      name: "Honeypot",
+      emoji: "🍯",
+      x: 4*TILE, y: 5*TILE, w: 20, h: 20,
+      hint: "I love you like Winnie the Pooh loves his honeypot!"
+    },
+    {
+      id: "lemon",
+      name: "Lemon",
+      emoji: "🍋",
+      x: 19*TILE, y: 10*TILE, w: 20, h: 20,
+      hint: "Lemon meringue pie for my sweet love!"
+    },
+    {
+      id: "arthur",
+      name: "Arthur",
+      emoji: "🐈",
+      x: 16*TILE, y: 11*TILE, w: 20, h: 20,
+      hint: "Meow!!!!!!! Arthur and I love you so very much <3"
+    },
+  ];
+
+  // ====== Player ======
+  const player = {
+    x: 12*TILE, y: 10*TILE,
+    w: 18, h: 22,
+    speed: 2.2,
+    facing: "down",
+    interactCooldown: 0,
+  };
+
+  // ====== Dialogue helpers ======
+  function openDialogue(lines) {
+    state.dialogueOpen = true;
+    state.dialogueLines = lines;
+    state.dialogueIndex = 0;
+  }
+
+    function advanceDialogue() {
+    if (!state.dialogueOpen) return;
+
+    state.dialogueIndex++;
+
+    // If we reached the end of the dialogue, close it
+    if (state.dialogueIndex >= state.dialogueLines.length) {
+        state.dialogueOpen = false;
+        state.dialogueIndex = state.dialogueLines.length - 1;
+
+        // AUTO-SHOW ENDING LETTER when quest is complete
+        if (state.questComplete) {
+        state.endingShown = true;
+        }
+    }
+    }
+
+  // ====== Interactions ======
+  function tryInteract() {
+    if (player.interactCooldown > 0) return;
+
+    // If dialogue open, "E" does nothing (Space advances).
+    if (state.dialogueOpen) return;
+
+    // Item pickup
+    for (const it of items) {
+      if (state.inventory.has(it.id)) continue;
+      const box = { x: it.x, y: it.y, w: it.w, h: it.h };
+      const pbox = { x: player.x, y: player.y, w: player.w, h: player.h };
+      // Slightly forgiving radius
+      const near = rectsOverlap(
+        { x: pbox.x - 10, y: pbox.y - 10, w: pbox.w + 20, h: pbox.h + 20 },
+        box
+      );
+      if (near) {
+        state.inventory.add(it.id);
+        openDialogue([
+          `You found: ${it.emoji} ${it.name}!`,
+          it.hint,
+          `Collected ${state.inventory.size}/3 items.`
+        ]);
+        player.interactCooldown = 12;
+        return;
+      }
+    }
+
+    // Porch turn-in
+    const pbox = { x: player.x, y: player.y, w: player.w, h: player.h };
+    const nearPorch = rectsOverlap(
+      { x: pbox.x - 12, y: pbox.y - 12, w: pbox.w + 24, h: pbox.h + 24 },
+      porch
+    );
+
+    if (nearPorch) {
+      if (state.inventory.size < 3) {
+        openDialogue([
+          "This porch feels important…",
+          `But you still need ${3 - state.inventory.size} more gift(s).`,
+          "Go explore the farm!"
+        ]);
+      } else if (!state.questComplete) {
+        state.questComplete = true;
+        openDialogue([
+          "Congrats! You collected all the gifts! 🎉",
+          "Monsieur Simon! Will you be my Valentine 💕?",
+          "(Press Space)"
+        ]);
+      } else if (state.questComplete && !state.endingShown) {
+        state.endingShown = true;
+      }
+      player.interactCooldown = 12;
+      return;
+    }
+
+    // Nothing nearby
+    openDialogue(["Nothing to interact with here.", "Try exploring!"]);
+    player.interactCooldown = 12;
+  }
+
+  // ====== Movement & collision ======
+  function movePlayer(dx, dy) {
+    // Move on X, then resolve collisions; repeat for Y
+    player.x += dx;
+    resolveCollisions("x");
+    player.y += dy;
+    resolveCollisions("y");
+
+    player.x = clamp(player.x, 0, W - player.w);
+    player.y = clamp(player.y, 0, H - player.h);
+  }
+
+  function resolveCollisions(axis) {
+    const p = { x: player.x, y: player.y, w: player.w, h: player.h };
+    for (const o of obstacles) {
+      if (!rectsOverlap(p, o)) continue;
+      // Push out depending on axis direction
+      if (axis === "x") {
+        if (p.x + p.w/2 < o.x + o.w/2) player.x = o.x - p.w - 0.01;
+        else player.x = o.x + o.w + 0.01;
+        p.x = player.x;
+      } else {
+        if (p.y + p.h/2 < o.y + o.h/2) player.y = o.y - p.h - 0.01;
+        else player.y = o.y + o.h + 0.01;
+        p.y = player.y;
+      }
+    }
+  }
+
+  // ====== Rendering (pixel vibe) ======
+  function drawBackground() {
+    // Day-night tint
+    const phase = state.dayPhase; // 0..1
+    // Base grass
+    ctx.fillStyle = "#1f5f3a";
+    ctx.fillRect(0, 0, W, H);
+
+    // Checker grass texture
+    for (let y = 0; y < H; y += 16) {
+      for (let x = 0; x < W; x += 16) {
+        const a = ((x/16 + y/16) % 2 === 0) ? 0.06 : 0.03;
+        ctx.fillStyle = `rgba(0,0,0,${a})`;
+        ctx.fillRect(x, y, 16, 16);
+      }
+    }
+
+    // Pond
+    ctx.fillStyle = "#1c4aa8";
+    ctx.fillRect(2*TILE, 9*TILE, 7*TILE, 3*TILE);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fillRect(2*TILE + 12, 9*TILE + 10, 7*TILE - 24, 8);
+
+    // House
+    ctx.fillStyle = "#5b3a24";
+    ctx.fillRect(10*TILE, 2*TILE, 6*TILE, 4*TILE);
+    // Roof
+    ctx.fillStyle = "#3b2320";
+    ctx.fillRect(9*TILE + 16, 2*TILE - 16, 8*TILE - 32, 24);
+    // Door
+    ctx.fillStyle = "#2b1a12";
+    ctx.fillRect(12*TILE + 10, 4*TILE + 8, 28, 56);
+    // Window
+    ctx.fillStyle = "#9ad7ff";
+    ctx.fillRect(14*TILE + 10, 3*TILE + 12, 28, 20);
+
+    // Porch area highlight
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(porch.x, porch.y, porch.w, porch.h);
+
+    // Fence
+    ctx.fillStyle = "#caa76b";
+    ctx.fillRect(0, 13*TILE, 24*TILE, TILE);
+    for (let x=0; x<W; x+=24) {
+      ctx.fillStyle = "rgba(0,0,0,0.15)";
+      ctx.fillRect(x, 13*TILE, 2, TILE);
+    }
+
+    // Soft vignette + time tint
+    ctx.fillStyle = `rgba(0,0,0,${0.18 + 0.28*phase})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // Warm sun overlay in daytime
+    ctx.fillStyle = `rgba(255,220,160,${0.10*(1-phase)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawItems() {
+    ctx.font = "20px system-ui, Arial";
+    for (const it of items) {
+      if (state.inventory.has(it.id)) continue;
+      // Tiny shadow
+      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.fillRect(it.x + 6, it.y + 14, it.w, 6);
+      // Marker tile
+      ctx.fillStyle = "rgba(255,255,255,0.15)";
+      ctx.fillRect(it.x - 6, it.y - 6, it.w + 12, it.h + 12);
+      // Emoji
+      ctx.fillStyle = "#fff";
+      ctx.fillText(it.emoji, it.x, it.y + 18);
+    }
+  }
+
+  function drawPlayer() {
+    // Simple pixel person
+    // Shadow
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(player.x - 2, player.y + player.h - 4, player.w + 4, 6);
+
+    // Body
+    ctx.fillStyle = "#e14b6a"; // shirt vibe
+    ctx.fillRect(player.x, player.y + 10, player.w, player.h - 10);
+
+    // Head
+    ctx.fillStyle = "#f0c7a4";
+    ctx.fillRect(player.x + 3, player.y, player.w - 6, 12);
+
+    // Hair
+    ctx.fillStyle = "#2a1b12";
+    ctx.fillRect(player.x + 3, player.y, player.w - 6, 5);
+
+    // Face dot depending on facing
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    if (player.facing === "left") ctx.fillRect(player.x + 5, player.y + 6, 2, 2);
+    if (player.facing === "right") ctx.fillRect(player.x + player.w - 7, player.y + 6, 2, 2);
+    if (player.facing === "down") ctx.fillRect(player.x + 8, player.y + 7, 2, 2);
+    if (player.facing === "up") ctx.fillRect(player.x + 8, player.y + 5, 2, 2);
+  }
+
+  function drawHUD() {
+    // Inventory bar
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(12, 12, 260, 44);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.strokeRect(12, 12, 260, 44);
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "14px system-ui, Arial";
+    ctx.fillText("Inventory:", 22, 30);
+
+    const inv = [
+      state.inventory.has("lemon") ? "🍋" : "□",
+      state.inventory.has("honeypot") ? "🍯" : "□",
+      state.inventory.has("arthur") ? "🐈" : "□",
+    ].join("  ");
+    ctx.font = "20px system-ui, Arial";
+    ctx.fillText(inv, 22, 52);
+
+    // Quest hint
+    ctx.font = "12px system-ui, Arial";
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    const hint = state.questComplete ? "Return to the porch ❤️" : "Collect 3 gifts, then go to the porch.";
+    ctx.fillText(hint, 290, 38);
+  }
+
+  function drawDialogueBox() {
+    if (!state.dialogueOpen) return;
+
+    const lines = wrapText(state.dialogueLines[state.dialogueIndex] ?? "", 56);
+    const boxH = 110;
+    const pad = 18;
+
+    ctx.fillStyle = "rgba(0,0,0,0.72)";
+    ctx.fillRect(18, H - boxH - 18, W - 36, boxH);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.strokeRect(18, H - boxH - 18, W - 36, boxH);
+
+    // Nameplate
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(34, H - boxH - 6, 120, 22);
+    ctx.fillStyle = "#fff";
+    ctx.font = "12px system-ui, Arial";
+    ctx.fillText("💌 Message", 44, H - boxH + 10);
+
+    // Text
+    ctx.font = "18px system-ui, Arial";
+    ctx.fillStyle = "#fff";
+    let y = H - boxH + 44;
+    for (const ln of lines) {
+      ctx.fillText(ln, 40, y);
+      y += 24;
+    }
+
+    // Continue hint
+    ctx.font = "12px system-ui, Arial";
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.fillText("Press Space to continue", W - 210, H - 34);
+  }
+
+  function drawEndingOverlay() {
+    if (!state.endingShown) return;
+
+    ctx.fillStyle = "rgba(0,0,0,0.78)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "28px system-ui, Arial";
+    centerText("Happy Valentine's Day💛", W/2, H/2 - 40);
+
+    ctx.font = "18px system-ui, Arial";
+    centerText("Here is my love letter to you", W/2, H/2 - 6);
+
+    // Letter box
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fillRect(120, H/2 + 24, W - 240, 120);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.strokeRect(120, H/2 + 24, W - 240, 120);
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "16px system-ui, Arial";
+    const letter = [
+      "My darling, thank you for being here",
+      "I love our histoire d'amour, being with you feels like home",
+      "Je t'aime à la folie",
+      "I cannot wait for all the future that awaits us",
+      "",
+      "— your pony"
+    ];
+    let y = H/2 + 54;
+    for (const l of letter) {
+      ctx.fillText(l, 140, y);
+      y += 20;
+    }
+
+    ctx.font = "12px system-ui, Arial";
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    centerText("Refresh the page to play again", W/2, H - 26);
+  }
+
+  function centerText(text, x, y) {
+    const m = ctx.measureText(text);
+    ctx.fillText(text, x - m.width/2, y);
+  }
+
+  function wrapText(text, maxChars) {
+    const words = text.split(" ");
+    const lines = [];
+    let line = "";
+    for (const w of words) {
+      const next = (line ? line + " " : "") + w;
+      if (next.length > maxChars) {
+        lines.push(line);
+        line = w;
+      } else line = next;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  // ====== Game Loop ======
+  function update(dt) {
+    state.time += dt;
+    // Slow day/night cycle
+    state.dayPhase = (Math.sin(state.time * 0.00015) + 1) / 2; // 0..1
+
+    // Cooldown
+    player.interactCooldown = Math.max(0, player.interactCooldown - 1);
+
+    // Input: dialogue
+    if (state.dialogueOpen) {
+      if (pressed(" ")) {
+        // edge trigger-ish: remove key to avoid rapid skipping
+        keys.delete(" ");
+        advanceDialogue();
+      }
+      return;
+    }
+
+    // Input: interact
+    if (pressed("e")) {
+      keys.delete("e");
+      tryInteract();
+    }
+
+    // Movement
+    let dx = 0, dy = 0;
+    if (pressed("arrowleft") || pressed("a")) dx -= 1;
+    if (pressed("arrowright") || pressed("d")) dx += 1;
+    if (pressed("arrowup") || pressed("w")) dy -= 1;
+    if (pressed("arrowdown") || pressed("s")) dy += 1;
+
+    // Normalize diagonal
+    if (dx !== 0 && dy !== 0) { dx *= 0.7071; dy *= 0.7071; }
+
+    if (dx < 0) player.facing = "left";
+    else if (dx > 0) player.facing = "right";
+    else if (dy < 0) player.facing = "up";
+    else if (dy > 0) player.facing = "down";
+
+    movePlayer(dx * player.speed, dy * player.speed);
+
+    // Auto show ending overlay after quest dialogue finishes
+    if (state.questComplete && !state.dialogueOpen && !state.endingShown) {
+      // If player finished the love message dialogue, show overlay
+      // (We only flip endingShown when player interacts again; keep as is.)
+    }
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+
+    drawBackground();
+    drawItems();
+    drawPlayer();
+    drawHUD();
+    drawDialogueBox();
+    drawEndingOverlay();
+
+    // Small interaction tooltip near porch
+    if (!state.dialogueOpen && !state.endingShown) {
+      const pbox = { x: player.x, y: player.y, w: player.w, h: player.h };
+      const nearPorch = rectsOverlap(
+        { x: pbox.x - 12, y: pbox.y - 12, w: pbox.w + 24, h: pbox.h + 24 },
+        porch
+      );
+      if (nearPorch) {
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(porch.x - 20, porch.y - 26, 120, 22);
+        ctx.fillStyle = "#fff";
+        ctx.font = "12px system-ui, Arial";
+        ctx.fillText("Press E (porch)", porch.x - 10, porch.y - 10);
+      }
+    }
+  }
+
+  // Fixed timestep-ish
+  let last = performance.now();
+  function loop(now) {
+    const dt = now - last;
+    last = now;
+
+    if (!state.endingShown) update(dt);
+    else {
+      // Still allow dialogue overlay and keep scene static
+      if (state.dialogueOpen && pressed(" ")) {
+        keys.delete(" ");
+        advanceDialogue();
+      }
+    }
+
+    // If questComplete and dialogue ended, allow E to show ending
+    if (state.questComplete && !state.dialogueOpen && !state.endingShown) {
+      // Press E near porch again to show ending letter
+      // (Handled in tryInteract)
+    }
+
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
